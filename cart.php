@@ -1,26 +1,39 @@
 <?php
 session_start();
-require_once('vendor/autoload.php'); // Include TCPDF library
+
+// Database connection
+$host = 'localhost';
+$db = 'products';
+$user = 'root';
+$pass = '';
+
+$conn = new mysqli($host, $user, $pass, $db);
+if ($conn->connect_error) {
+    die("Database connection failed: " . $conn->connect_error);
+}
 
 // Initialize the cart if not already done
 if (!isset($_SESSION['cart'])) {
     $_SESSION['cart'] = [];
 }
 
-// Add the product to the cart
+// Order success message
+$orderSuccess = false;
+$orderId = null;
+
+// Add product to cart
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['name'], $_POST['weight'], $_POST['price'])) {
     $product = [
-        'name' => $_POST['name'],
-        'weight' => $_POST['weight'],
-        'price' => floatval($_POST['price']), // Ensure price is treated as a number
+        'name' => htmlspecialchars($_POST['name']),
+        'weight' => floatval($_POST['weight']),
+        'price' => floatval($_POST['price']),
     ];
-
-    // Check if the item already exists in the cart
+    
     $found = false;
     foreach ($_SESSION['cart'] as &$cartItem) {
         if ($cartItem['name'] === $product['name']) {
-            $cartItem['weight'] += $product['weight']; // Add weight
-            $cartItem['price'] += $product['price']; // Add price
+            $cartItem['weight'] += $product['weight'];
+            $cartItem['price'] += $product['price'];
             $found = true;
             break;
         }
@@ -30,82 +43,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['name'], $_POST['weigh
     }
 }
 
-// Remove a specific product from the cart
+// Remove a product from the cart
 if (isset($_POST['remove_item'])) {
     $index = $_POST['remove_item'];
     unset($_SESSION['cart'][$index]);
-    $_SESSION['cart'] = array_values($_SESSION['cart']); // Reindex array after removing item
+    $_SESSION['cart'] = array_values($_SESSION['cart']);
 }
 
-// Display cart contents
+// Handle order placement
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['userName'], $_POST['userAddress'], $_POST['userMobile'])) {
+    $userName = $conn->real_escape_string($_POST['userName']);
+    $userAddress = $conn->real_escape_string($_POST['userAddress']);
+    $userMobile = $conn->real_escape_string($_POST['userMobile']);
+    $totalAmount = array_sum(array_column($_SESSION['cart'], 'price'));
+
+    $sql = "INSERT INTO orders (user_name, user_address, user_mobile, total_amount) VALUES ('$userName', '$userAddress', '$userMobile', '$totalAmount')";
+    if ($conn->query($sql) === TRUE) {
+        $orderId = $conn->insert_id;
+        
+        $stmt = $conn->prepare("INSERT INTO order_items (order_id, product_name, weight, price) VALUES (?, ?, ?, ?)");
+        foreach ($_SESSION['cart'] as $item) {
+            $stmt->bind_param("isdd", $orderId, $item['name'], $item['weight'], $item['price']);
+            $stmt->execute();
+        }
+        $stmt->close();
+        
+        $orderSuccess = true;
+        $_SESSION['cart'] = [];
+    }
+}
+
+// View order details
+if (isset($_GET['order_id'])) {
+    $orderId = $_GET['order_id'];
+    $orderQuery = $conn->query("SELECT * FROM orders WHERE id = $orderId");
+    $orderDetails = $orderQuery->fetch_assoc();
+    
+    $orderItemsQuery = $conn->query("SELECT * FROM order_items WHERE order_id = $orderId");
+    $orderItems = [];
+    while ($item = $orderItemsQuery->fetch_assoc()) {
+        $orderItems[] = $item;
+    }
+}
+
 $cartItems = $_SESSION['cart'];
 $totalAmount = array_sum(array_column($cartItems, 'price'));
 
-// Error messages for empty fields
-$nameError = $addressError = $mobileError = '';
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_pdf'])) {
-    $userName = $_POST['user_name'] ?? '';
-    $userAddress = $_POST['user_address'] ?? '';
-    $userMobile = $_POST['user_mobile'] ?? '';
-
-    // Validate user information
-    if (empty($userName)) {
-        $nameError = "Name is required.";
-    }
-    if (empty($userAddress)) {
-        $addressError = "Address is required.";
-    }
-    if (empty($userMobile)) {
-        $mobileError = "Mobile Number is required.";
-    }
-
-    if (empty($nameError) && empty($addressError) && empty($mobileError)) {
-        ob_start(); // Start output buffering to prevent errors
-        $pdf = new TCPDF();
-        $pdf->AddPage();
-        $pdf->SetFont('helvetica', '', 12);
-
-        // PDF Header with "King Tiger"
-        $pdf->SetFont('helvetica', 'B', 16);
-        $pdf->Cell(0, 10, 'King Tiger', 0, 1, 'C'); // Centered header
-        $pdf->Ln(10); // Line break
-
-        // User Details in PDF
-        $pdf->SetFont('helvetica', '', 12);
-        $pdf->Cell(0, 10, 'Name: ' . htmlspecialchars($userName), 0, 1);
-        $pdf->Cell(0, 10, 'Address: ' . htmlspecialchars($userAddress), 0, 1);
-        $pdf->Cell(0, 10, 'Mobile: ' . htmlspecialchars($userMobile), 0, 1);
-        $pdf->Ln(5);
-
-        // Cart items table
-        $html = '<table border="1" cellpadding="5">
-                    <thead>
-                        <tr>
-                            <th>Product Name</th>
-                            <th>Weight/Quantity</th>
-                            <th>Price</th>
-                        </tr>
-                    </thead>
-                    <tbody>';
-        foreach ($cartItems as $item) {
-            $html .= '<tr>
-                        <td>' . htmlspecialchars($item['name']) . '</td>
-                        <td>' . htmlspecialchars($item['weight']) . '</td>
-                        <td>₹' . number_format($item['price'], 2) . '</td> <!-- Display price with ₹ -->
-                      </tr>';
-        }
-        $html .= '<tr>
-                    <td colspan="2"><strong>Total</strong></td>
-                    <td><strong>₹' . number_format($totalAmount, 2) . '</strong></td> <!-- Display total with ₹ -->
-                  </tr>';
-        $html .= '</tbody></table>';
-
-        $pdf->writeHTML($html);
-        ob_end_clean(); // Clean output buffer before generating PDF
-        $_SESSION['cart'] = []; // Clear the cart after PDF generation
-        $pdf->Output('cart.pdf', 'D'); // Download PDF
-        exit;
-    }
+function formatCurrency($amount) {
+    return '₹' . number_format($amount, 2);
 }
 ?>
 
@@ -114,112 +99,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_pdf'])) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cart</title>
+    <title>Cart and Order Page</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            background-color: #f2f2f2;
-            margin: 0;
-            padding: 20px;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            background: white;
-        }
-        th, td {
-            border: 1px solid #ddd;
-            padding: 10px;
-            text-align: center;
-        }
-        th {
-            background-color: #704214;
-            color: white;
-        }
-        input {
-            display: block;
-            width: 100%;
-            padding: 10px;
-            margin: 5px 0;
-            border: 1px solid #ccc;
-            border-radius: 5px;
-        }
-        input.error {
-            border-color: red;
-        }
-        button {
-            padding: 5px 10px;
-            background-color: #704214;
-            color: white;
-            border: none;
-            cursor: pointer;
-            margin: 5px 0;
-        }
-        .error-message {
-            color: red;
-            font-size: 0.9em;
-        }
-        .whatsapp-btn {
-            background-color: #25d366;
-            color: white;
-            border-radius: 5px;
-            text-align: center;
-            padding: 10px 15px;
-            display: inline-block;
-            cursor: pointer;
-            margin-left: 10px;
-            text-decoration: none;
-        }
-        .whatsapp-btn:hover {
-            background-color: #128C7E;
-        }
+        body { font-family: Arial, sans-serif; background-color: #e8f5e9; color: green; padding: 20px; }
+        h1, h3 { color: green; text-align: center; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid green; padding: 10px; text-align: left; }
+        th { background-color: #c8e6c9; }
+        button { background-color: green; color: white; border: none; padding: 10px; cursor: pointer; width: 100%; }
+        button:hover { background-color: darkgreen; }
+        .cart-container { margin-bottom: 20px; overflow-x: auto; }
+        .success-message { color: green; font-weight: bold; margin-top: 20px; text-align: center; }
+        form { display: flex; flex-direction: column; gap: 10px; align-items: center; }
+        input { width: 80%; padding: 10px; border: 1px solid green; border-radius: 5px; }
+        .button-container { display: flex; justify-content: space-around; margin-top: 20px; }
+        .button-container a { text-decoration: none; }
 
-        /* Media Queries for Responsiveness */
+        /* Responsive Design */
         @media (max-width: 768px) {
-            table th, table td {
-                padding: 8px;
-            }
-            input, button {
-                padding: 8px;
-            }
-            .whatsapp-btn {
-                padding: 8px 12px;
-            }
+            body { padding: 10px; }
+            table, th, td { font-size: 14px; }
+            button { font-size: 14px; }
+            .cart-container { overflow-x: auto; }
+            form { width: 100%; }
+            input { width: 100%; }
         }
 
-        @media (max-width: 480px) {
-            table th, table td {
-                padding: 6px;
-            }
-            input, button {
-                padding: 6px;
-            }
-            .whatsapp-btn {
-                padding: 6px 10px;
-            }
+        @media (max-width: 600px) {
+            table, th, td { font-size: 12px; }
+            button { font-size: 12px; }
+            input { width: 100%; padding: 8px; }
         }
     </style>
 </head>
 <body>
     <h1>Your Cart</h1>
-    <table>
-        <thead>
-            <tr>
-                <th>Product Name</th>
-                <th>Weight/Quantity</th>
-                <th>Price</th>
-                <th>Remove</th>
-            </tr>
-        </thead>
-        <tbody>
-            <?php if (!empty($cartItems)): ?>
+    <div class="cart-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Product Name</th>
+                    <th>Weight/Quantity</th>
+                    <th>Price</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
                 <?php foreach ($cartItems as $index => $item): ?>
                 <tr>
                     <td><?= htmlspecialchars($item['name']) ?></td>
                     <td><?= htmlspecialchars($item['weight']) ?></td>
-                    <td>₹<?= number_format($item['price'], 2) ?></td>
+                    <td><?= formatCurrency($item['price']) ?></td>
                     <td>
-                        <form method="post">
+                        <form method="post" style="display: inline;">
                             <button type="submit" name="remove_item" value="<?= $index ?>">Remove</button>
                         </form>
                     </td>
@@ -227,44 +160,131 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_pdf'])) {
                 <?php endforeach; ?>
                 <tr>
                     <td colspan="3"><strong>Total Amount</strong></td>
-                    <td><strong>₹<?= number_format($totalAmount, 2) ?></strong></td>
+                    <td><strong><?= formatCurrency($totalAmount) ?></strong></td>
                 </tr>
-            <?php else: ?>
-            <tr>
-                <td colspan="4">Your cart is empty.</td>
-            </tr>
-            <?php endif; ?>
-        </tbody>
-    </table>
+            </tbody>
+        </table>
+    </div>
 
-    <form method="post">
+    <form id="userDetailsForm" method="post">
         <h3>Enter Your Details</h3>
-        <div>
-            <input type="text" name="user_name" placeholder="Name" class="<?= !empty($nameError) ? 'error' : '' ?>" value="<?= htmlspecialchars($_POST['user_name'] ?? '') ?>">
-            <?php if (!empty($nameError)): ?>
-                <span class="error-message"><?= $nameError ?></span>
-            <?php endif; ?>
-        </div>
-        <div>
-            <input type="text" name="user_address" placeholder="Address" class="<?= !empty($addressError) ? 'error' : '' ?>" value="<?= htmlspecialchars($_POST['user_address'] ?? '') ?>">
-            <?php if (!empty($addressError)): ?>
-                <span class="error-message"><?= $addressError ?></span>
-            <?php endif; ?>
-        </div>
-        <div>
-            <input type="text" name="user_mobile" placeholder="Mobile Number" class="<?= !empty($mobileError) ? 'error' : '' ?>" value="<?= htmlspecialchars($_POST['user_mobile'] ?? '') ?>">
-            <?php if (!empty($mobileError)): ?>
-                <span class="error-message"><?= $mobileError ?></span>
-            <?php endif; ?>
-        </div>
-        <button type="submit" name="generate_pdf">Generate PDF</button>
-
-        <!-- WhatsApp Button -->
-        <a href="https://wa.me/8809429011?text=I%20have%20generated%20the%20PDF%20and%20I%20want%20to%20send%20it%20to%20you." target="_blank" class="whatsapp-btn">
-            Send via WhatsApp generate Your product pdf
-        </a>
+        <input type="text" name="userName" placeholder="Name" required>
+        <input type="text" name="userAddress" placeholder="Address" required>
+        <input type="number" name="userMobile" placeholder="Mobile Number" required minlength="10" maxlength="10">
+        <button type="submit">Place Order</button>
     </form>
 
-    <a href="index.php"><button>Back to Products</button></a>
+    <div class="button-container">
+        <a href="index.php"><button>Back to Products</button></a>
+        <a href="https://wa.me/qr/YVULH425NYCNI1" target="_blank"><button>Send via WhatsApp</button></a>
+    </div>
+
+    <?php if ($orderSuccess): ?>
+        <div class="success-message">Your order has been successfully placed! 🎉</div>
+        <div class="button-container">
+            <a href="?order_id=<?= $orderId ?>"><button>View Order Details</button></a>
+        </div>
+    <?php endif; ?>
+
+    <?php if (isset($orderDetails)): ?>
+        <h3>Order Details</h3>
+        <table>
+            <tr>
+                <th>Order ID</th>
+                <td><?= $orderDetails['id'] ?></td>
+            </tr>
+            <tr>
+                <th>User Name</th>
+                <td><?= $orderDetails['user_name'] ?></td>
+            </tr>
+            <tr>
+                <th>Address</th>
+                <td><?= $orderDetails['user_address'] ?></td>
+            </tr>
+            <tr>
+                <th>Mobile</th>
+                <td><?= $orderDetails['user_mobile'] ?></td>
+            </tr>
+            <tr>
+                <th>Total Amount</th>
+                <td><?= formatCurrency($orderDetails['total_amount']) ?></td>
+            </tr>
+        </table>
+
+        <h3>Products Ordered</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Product Name</th>
+                    <th>Weight</th>
+                    <th>Price</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($orderItems as $item): ?>
+                <tr>
+                    <td><?= htmlspecialchars($item['product_name']) ?></td>
+                    <td><?= htmlspecialchars($item['weight']) ?></td>
+                    <td><?= formatCurrency($item['price']) ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+
+        <button onclick="generatePDF()">Download Order PDF</button>
+    <?php endif; ?>
+
+    <script>
+        function generatePDF() {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+
+            doc.setFontSize(16);
+            doc.text("Order Details", 20, 20);
+
+            doc.setFontSize(12);
+            doc.text("Order ID: <?= $orderDetails['id'] ?>", 20, 30);
+            doc.text("User Name: <?= $orderDetails['user_name'] ?>", 20, 40);
+            doc.text("Address: <?= $orderDetails['user_address'] ?>", 20, 50);
+            doc.text("Mobile: <?= $orderDetails['user_mobile'] ?>", 20, 60);
+
+            let yPosition = 80;
+            doc.text("Products Ordered:", 20, yPosition);
+
+            const header = ["Product Name", "Weight", "Price"];
+            let startX = 20;
+            let startY = yPosition + 10;
+            const colWidths = [80, 40, 40];
+
+            doc.setFontSize(10);
+            doc.setFont("helvetica", "bold");
+            for (let i = 0; i < header.length; i++) {
+                doc.text(header[i], startX + colWidths[i] * i, startY);
+            }
+
+            doc.setFont("helvetica", "normal");
+            let rowHeight = 10;
+            yPosition = startY + rowHeight;
+
+            <?php foreach ($orderItems as $item): ?>
+                doc.text("<?= $item['product_name'] ?>", startX, yPosition);
+                doc.text("<?= $item['weight'] ?>", startX + colWidths[0], yPosition);
+                doc.text("<?= formatCurrency($item['price']) ?>", startX + colWidths[0] + colWidths[1], yPosition);
+                yPosition += rowHeight;
+            <?php endforeach; ?>
+
+            const totalAmount = 'Total Amount: <?= formatCurrency($orderDetails['total_amount']) ?>';
+            const pageWidth = doc.internal.pageSize.width;
+            const margin = 20;
+            const totalWidth = doc.getTextWidth(totalAmount);
+            const xPosition = (pageWidth - totalWidth) / 2;
+
+            doc.setFontSize(12);
+            doc.setFont("helvetica", "bold");
+            doc.text(totalAmount, xPosition, yPosition + 20);
+
+            doc.save('order_<?= $orderDetails['id'] ?>.pdf');
+        }
+    </script>
 </body>
 </html>

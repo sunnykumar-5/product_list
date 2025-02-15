@@ -7,6 +7,7 @@ $db = 'products';
 $user = 'root';
 $pass = '';
 
+
 $conn = new mysqli($host, $user, $pass, $db);
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
@@ -64,9 +65,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_product']) && iss
     $weight = $conn->real_escape_string($_POST['weight']);
     $price = (float)$_POST['price'];
 
-    $query = "INSERT INTO products (name, weight, price) VALUES ('$name', '$weight', $price)";
+    // Check if editing or adding a new product
+    if (!empty($_POST['product_id'])) {
+        $id = (int)$_POST['product_id'];
+        $query = "UPDATE products SET name = '$name', weight = '$weight', price = $price WHERE id = $id";
+    } else {
+        $query = "INSERT INTO products (name, weight, price) VALUES ('$name', '$weight', $price)";
+    }
+
     if ($conn->query($query) === TRUE) {
-        $success = "Product added successfully.";
+        $success = "Product " . (!empty($_POST['product_id']) ? "updated" : "added") . " successfully.";
     } else {
         $error = "Error: " . $conn->error;
     }
@@ -78,6 +86,16 @@ if (isset($_SESSION['admin_logged_in'])) {
     $result = $conn->query("SELECT * FROM products");
     if ($result->num_rows > 0) {
         $products = $result->fetch_all(MYSQLI_ASSOC);
+    }
+}
+
+// For editing product
+$product_to_edit = null;
+if (isset($_GET['edit']) && isset($_SESSION['admin_logged_in'])) {
+    $id = (int)$_GET['edit'];
+    $result = $conn->query("SELECT * FROM products WHERE id = $id");
+    if ($result->num_rows > 0) {
+        $product_to_edit = $result->fetch_assoc();
     }
 }
 ?>
@@ -139,12 +157,17 @@ if (isset($_SESSION['admin_logged_in'])) {
             margin-bottom: 10px;
         }
 
-        /* Media Queries for Responsiveness */
-        @media (max-width: 768px) {
+        /* Responsive Styles */
+        @media screen and (max-width: 768px) {
             .container {
-                padding: 15px;
+                max-width: 100%;
+                padding: 10px;
             }
-            table th, table td {
+            table {
+                font-size: 12px;
+                overflow-x: auto;
+            }
+            th, td {
                 padding: 8px;
             }
             input, button {
@@ -152,17 +175,18 @@ if (isset($_SESSION['admin_logged_in'])) {
             }
         }
 
-        /* For mobile devices */
-        @media (max-width: 480px) {
+        @media screen and (max-width: 480px) {
             body {
                 padding: 10px;
             }
             .container {
-                max-width: 100%;
-                padding: 10px;
+                padding: 15px;
             }
-            table th, table td {
-                padding: 6px;
+            table {
+                font-size: 10px;
+            }
+            th, td {
+                padding: 5px;
             }
             input, button {
                 padding: 6px;
@@ -184,21 +208,25 @@ if (isset($_SESSION['admin_logged_in'])) {
             </form>
         <?php else: ?>
             <h1>Admin Panel</h1>
+             <!-- Orders Button -->
+             <a href="admin_panel.php"><button>Orders</button></a>
             <a href="?logout=true" style="float: right;">Logout</a>
-            <h2>Add Product</h2>
+            <h2><?= $product_to_edit ? "Edit Product" : "Add Product" ?></h2>
             <?php if (isset($success)): ?>
                 <div class="success"><?= htmlspecialchars($success) ?></div>
             <?php elseif (isset($error)): ?>
                 <div class="error"><?= htmlspecialchars($error) ?></div>
             <?php endif; ?>
             <form method="POST">
-                <input type="text" name="name" placeholder="Product Name" required>
-                <input type="text" name="weight" placeholder="Weight/Quantity" required>
-                <input type="number" step="0.01" name="price" placeholder="Price" required>
-                <button type="submit" name="add_product">Add Product</button>
+                <input type="hidden" name="product_id" value="<?= $product_to_edit['id'] ?? '' ?>">
+                <input type="text" name="name" placeholder="Product Name" value="<?= $product_to_edit['name'] ?? '' ?>" required>
+                <input type="text" name="weight" placeholder="Weight/Quantity" value="<?= $product_to_edit['weight'] ?? '' ?>" required>
+                <input type="number" step="0.01" name="price" placeholder="Price" value="<?= $product_to_edit['price'] ?? '' ?>" required>
+                <button type="submit" name="add_product"><?= $product_to_edit ? "Update Product" : "Add Product" ?></button>
             </form>
 
             <h2>Product List</h2>
+            
             <table>
                 <thead>
                     <tr>
@@ -206,6 +234,7 @@ if (isset($_SESSION['admin_logged_in'])) {
                         <th>Name</th>
                         <th>Weight</th>
                         <th>Price</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -216,15 +245,20 @@ if (isset($_SESSION['admin_logged_in'])) {
                                 <td><?= htmlspecialchars($product['name']) ?></td>
                                 <td><?= htmlspecialchars($product['weight']) ?></td>
                                 <td>₹<?= number_format($product['price'], 2) ?></td>
+                                <td>
+                                    <a href="?edit=<?= $product['id'] ?>">Edit</a>
+                                </td>
                             </tr>
                         <?php endforeach; ?>
                     <?php else: ?>
                         <tr>
-                            <td colspan="4">No products found.</td>
+                            <td colspan="5">No products found.</td>
                         </tr>
                     <?php endif; ?>
                 </tbody>
             </table>
+
+           
         <?php endif; ?>
     </div>
 </body>
